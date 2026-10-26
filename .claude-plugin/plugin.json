@@ -1,5 +1,5 @@
 {
-  "name": "first-mod",
+  "name": "claude-code-linear-work-sync",
   "version": "0.1.0",
   "description": "Counts Claude's tool calls, shows the count beside the spinner, and adds a /tally command",
   "author": { "name": "Your Name" }
