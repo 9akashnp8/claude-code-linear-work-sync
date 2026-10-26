@@ -1,4 +1,13 @@
-let configuration = {}
+const LINEAR_API_BASE_URL = 'https://api.linear.app/graphql'
+
+async function queryLinearGql($, headers, method, data) {
+  const response = await $.http.fetch(LINEAR_API_BASE_URL, {
+    method: method,
+    headers: headers,
+    body: JSON.stringify(data)
+  })
+  await $.ui.log(`Response: ${JSON.stringify(response)}`)
+}
 
 export function register(on) {
   on("session.start", async ($, e, next) => {
@@ -30,17 +39,24 @@ export function register(on) {
       children: [
         Text({ children: ["Link the Linear Issue that you want to work on"] }),
         Input({
-          key: 'linear-base-url',
-          label: 'Linear Base URL',
-          placeholder: 'Enter the Liner Organization Base URL',
-          value: '',
-          submitLabel: 'add',
+          key: "linear-base-url",
+          label: "Linear Base URL",
+          placeholder: "Enter the Liner Organization Base URL",
+          value: "",
+          submitLabel: "add",
           autoFocus: true,
           onSubmit: async (value) => {
-            if (!value.trim()) return
-            configuration = {...configuration, value: value}
-            redraw()
-            await $.store.set('configuration', configuration)
+            if (!value.trim()) return;
+            await $.env.set("LINEAR_API_KEY", value.trim())
+            await $.ui.log(`Linear Credentials Captured! Use 'Test Connection' to validate the connection`)
+          },
+        }),
+        Button({
+          key: 'test-api',
+          label: 'Test Connection',
+          onPress: async () => {
+            const response = await queryLinearGql($, {'content-type': 'application/json'}, 'POST', { "query": "{ issues { nodes { id title } } }" })
+            await $.ui.log(response)
           }
         })
       ],
