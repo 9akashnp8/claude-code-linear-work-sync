@@ -1,7 +1,12 @@
+import {atom, read, update} from "claude-code"
+import { WORK_SUMMARIZER_SYSTEM_PROMPT } from "./prompt";
+import { ISSUE_DETAIL_QUERY, parseLinearGqlResponse } from "./linear"
 const LINEAR_API_BASE_URL = "https://api.linear.app/graphql";
 
 let sessionIssueMap = {};
 let isConnectionSuccess = false;
+
+const summary = atom({ plugin: 'first-mod', key: 'summary' }, '')
 
 async function queryLinearGql($, headers, method, data) {
   const response = await $.http.fetch(LINEAR_API_BASE_URL, {
@@ -157,9 +162,11 @@ export function register(on) {
     if (e.requestId !== "linear-issue-update-pane") return next(e);
 
     const sessionId = await $.session.id();
-    const linkedIssue = await $.store.get(sessionId);
+    const sessionIssueMap = await $.store.get("sessionIssueMap");
+    const linkedIssue = sessionIssueMap[sessionId];
     const redraw = () => $.ui.invalidate("ui.render");
     const { Box, Text, Button, Input, Select } = $.ui.resolve(e);
+    const text = await read($, summary)
 
     const agents = await $.agent.list();
     await $.ui.log(JSON.stringify(agents));
@@ -169,12 +176,62 @@ export function register(on) {
 
     async function generateSummary() {
       await $.ui.log("Summary generation started");
+
+      const issueDetail = await queryLinearGql(
+        $,
+        { "content-type": "application/json" },
+        "POST",
+        {
+          query: ISSUE_DETAIL_QUERY,
+          variables: {
+            id: linkedIssue,
+          },
+        },
+      );
+
+      const issue = parseLinearGqlResponse(issueDetail)
+      
+      update($, summary, () => issueDetail)
+
+      const text = await read($, summary)
+      await $.ui.log(`Text: ${JSON.stringify(issue)}`)
       const sessionMessages = await $.session.messages();
       try {
         const r = await $.model.complete({
           model: "sonnet",
-          system: "You are a work summarizer...",
-          prompt: `Here's the conversation so far: ${JSON.stringify(sessionMessages)}`,
+          system: WORK_SUMMARIZER_SYSTEM_PROMPT,
+          prompt: `
+          <issue>
+            <title>${issue.title}</title>
+            <description>
+              ${issue.description}
+            </description>
+          </issue>
+
+          <previous_updates>
+          ${issue?.comments?.nodes.map((c) => {
+            return `
+            <update date="${c.createdAt}"> 
+            ${c.body}
+            </update>
+            `
+          })}
+          </previous_updates>
+
+          <session_date>${123}</session_date>
+
+          <session>
+          ${sessionMessages.map((m) => {
+            return `
+            <${m.role}>
+            ${m.text}
+            </${m.role}> 
+            `
+          })}
+          </session>
+
+          Write the update for this session.
+          `,
         });
         await $.ui.log(`Summary Response: ${JSON.stringify(r)}`);
         const answer = r.isAnswered ? r.text.trim() : "unknown";
@@ -199,6 +256,16 @@ export function register(on) {
                 await generateSummary();
               },
             }),
+            Button({
+              key: "clear-update-from-history",
+              label: "Clear Update from history",
+              onPress: async () => {
+                update($, summary, () => '')
+              },
+            }),
+            Text({
+              children: [`Summary: ${JSON.stringify(text)}`]
+            })
           ],
         }),
       ],
