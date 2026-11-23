@@ -3,10 +3,9 @@ import { WORK_SUMMARIZER_SYSTEM_PROMPT } from "./prompt";
 import { ISSUE_DETAIL_QUERY, parseLinearGqlResponse } from "./linear"
 const LINEAR_API_BASE_URL = "https://api.linear.app/graphql";
 
-let sessionIssueMap = {};
-let isConnectionSuccess = false;
+const PLUGIN_NAME = "claude-code-linear-work-sync";
 
-const summary = atom({ plugin: 'first-mod', key: 'summary' }, '')
+const summary = atom({ plugin: PLUGIN_NAME, key: 'summary' }, '')
 
 async function queryLinearGql($, headers, method, data) {
   const response = await $.http.fetch(LINEAR_API_BASE_URL, {
@@ -72,6 +71,10 @@ export function register(on) {
 
     const redraw = () => $.ui.invalidate("ui.render");
 
+    // Persisted in the store so it survives a plugin reload.
+    const isConnectionSuccess =
+      (await $.store.get("isConnectionSuccess")) === true;
+
     let issueNodes = [{ id: "test", title: "test" }];
     if (isConnectionSuccess) {
       const linearIssues = await queryLinearGql(
@@ -97,7 +100,13 @@ export function register(on) {
           options: issueNodes.map((n) => ({ value: n.id, label: n.title })),
           value: "",
           onSelect: async (value) => {
-            await $.store.set("sessionIssueMap", { [sessionId]: value });
+            // Merge into the existing map so other sessions keep their links.
+            const sessionIssueMap =
+              (await $.store.get("sessionIssueMap")) ?? {};
+            await $.store.set("sessionIssueMap", {
+              ...sessionIssueMap,
+              [sessionId]: value,
+            });
             await $.ui.log(`Session ${sessionId} linked to Issue: ${value}`);
             await $.ui.close({ id: "linear-issue-linking-pane" });
           },
@@ -123,6 +132,9 @@ export function register(on) {
               onSubmit: async (value) => {
                 if (!value.trim()) return;
                 await $.env.set("LINEAR_API_KEY", value.trim());
+                // A new key has not been tested yet.
+                await $.store.set("isConnectionSuccess", false);
+                redraw();
                 await $.ui.log(
                   `Linear Credentials Captured! Use 'Test Connection' to validate the connection`,
                 );
@@ -141,10 +153,12 @@ export function register(on) {
                 const { status } = response;
                 if (status == 200) {
                   await $.ui.log("Linear Configuration Succesful!");
-                  isConnectionSuccess = true;
+                  await $.store.set("isConnectionSuccess", true);
                   redraw();
                   // await $.ui.close({ id: "linear-issue-linking-pane" });
                 } else {
+                  await $.store.set("isConnectionSuccess", false);
+                  redraw();
                   await $.ui.log(
                     `Something went wrong: ${JSON.stringify(response)}`,
                   );
@@ -162,16 +176,30 @@ export function register(on) {
     if (e.requestId !== "linear-issue-update-pane") return next(e);
 
     const sessionId = await $.session.id();
-    const sessionIssueMap = await $.store.get("sessionIssueMap");
+    const sessionIssueMap = (await $.store.get("sessionIssueMap")) ?? {};
     const linkedIssue = sessionIssueMap[sessionId];
     const redraw = () => $.ui.invalidate("ui.render");
     const { Box, Text, Button, Input, Select } = $.ui.resolve(e);
+
+    if (!linkedIssue) {
+      return Box({
+        flexDirection: "column",
+        children: [
+          Text({
+            children: [
+              "No Linear issue is linked to this session. Run /link-linear first.",
+            ],
+          }),
+        ],
+      });
+    }
+
     const text = await read($, summary)
 
     const agents = await $.agent.list();
     await $.ui.log(JSON.stringify(agents));
     const workSummarizerAgent = agents.find(
-      (a) => a.type == "first-mod:work-summarizer",
+      (a) => a.type == `${PLUGIN_NAME}:work-summarizer`,
     );
 
     async function generateSummary() {
@@ -189,49 +217,55 @@ export function register(on) {
         },
       );
 
-      const issue = parseLinearGqlResponse(issueDetail)
-      
+      // The parser returns the GraphQL `data` object, which wraps the issue.
+      const issue = parseLinearGqlResponse(issueDetail)?.issue;
+      if (!issue) {
+        await $.ui.log(
+          `Could not load Linear issue ${linkedIssue}: ${issueDetail.text}`,
+        );
+        return;
+      }
+
       update($, summary, () => issueDetail)
 
-      const text = await read($, summary)
       await $.ui.log(`Text: ${JSON.stringify(issue)}`)
       const sessionMessages = await $.session.messages();
+
+      // The system prompt promises previous updates oldest first, and the
+      // Linear API has no sort direction, so sort here.
+      const previousUpdates = [...(issue.comments?.nodes ?? [])]
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .map((c) => `<update date="${c.createdAt}">\n${c.body}\n</update>`)
+        .join("\n");
+      const sessionTranscript = sessionMessages
+        .map((m) => `<${m.role}>\n${m.text}\n</${m.role}>`)
+        .join("\n");
+      const sessionDate = new Date().toISOString().slice(0, 10);
+
+      const prompt = `<issue>
+<title>${issue.title}</title>
+<description>
+${issue.description ?? ""}
+</description>
+</issue>
+
+<previous_updates>
+${previousUpdates}
+</previous_updates>
+
+<session_date>${sessionDate}</session_date>
+
+<session>
+${sessionTranscript}
+</session>
+
+Write the update for this session.`;
+
       try {
         const r = await $.model.complete({
           model: "sonnet",
           system: WORK_SUMMARIZER_SYSTEM_PROMPT,
-          prompt: `
-          <issue>
-            <title>${issue.title}</title>
-            <description>
-              ${issue.description}
-            </description>
-          </issue>
-
-          <previous_updates>
-          ${issue?.comments?.nodes.map((c) => {
-            return `
-            <update date="${c.createdAt}"> 
-            ${c.body}
-            </update>
-            `
-          })}
-          </previous_updates>
-
-          <session_date>${123}</session_date>
-
-          <session>
-          ${sessionMessages.map((m) => {
-            return `
-            <${m.role}>
-            ${m.text}
-            </${m.role}> 
-            `
-          })}
-          </session>
-
-          Write the update for this session.
-          `,
+          prompt,
         });
         await $.ui.log(`Summary Response: ${JSON.stringify(r)}`);
         const answer = r.isAnswered ? r.text.trim() : "unknown";

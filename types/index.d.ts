@@ -1,6 +1,6 @@
 declare module 'claude-code' {
   interface PluginState {
-    'first-mod': {
+    'claude-code-linear-work-sync': {
       summary: string
     }
   }

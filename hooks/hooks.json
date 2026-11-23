@@ -1,4 +1,4 @@
 {
-  "description": "The first-mod hooks module",
+  "description": "The claude-code-linear-work-sync hooks module",
   "modules": ["./register.js"]
 }
