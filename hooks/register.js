@@ -3,9 +3,13 @@ import { WORK_SUMMARIZER_SYSTEM_PROMPT } from "./prompt";
 import { ISSUE_DETAIL_QUERY, parseLinearGqlResponse } from "./linear"
 const LINEAR_API_BASE_URL = "https://api.linear.app/graphql";
 
-const PLUGIN_NAME = "claude-code-linear-work-sync";
+const PLUGIN_NAME = "linear-work-sync";
 
-const summary = atom({ plugin: PLUGIN_NAME, key: 'summary' }, '')
+// The engine reads atom refs statically, so plugin and key must be literals.
+const summary = atom(
+  { plugin: "linear-work-sync", key: "summary" },
+  "",
+);
 
 async function queryLinearGql($, headers, method, data) {
   const response = await $.http.fetch(LINEAR_API_BASE_URL, {
