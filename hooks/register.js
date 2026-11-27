@@ -11,6 +11,42 @@ const summary = atom(
   "",
 );
 
+// Session state, not $.store: it has to last exactly as long as the key that
+// $.env.set holds, which is this process. It survives a hot reload, but a new
+// session starts disconnected, as it has no key yet.
+const connected = atom(
+  { plugin: "linear-work-sync", key: "connected" },
+  false,
+);
+
+// Resolves { nodes } with the issue list, or { error } saying why there is
+// none, so a failed request never throws inside a render.
+async function fetchIssues($) {
+  if (!(await $.env.get("LINEAR_API_KEY"))) {
+    return { error: "No Linear API key is set in this session" };
+  }
+  const response = await queryLinearGql(
+    $,
+    { "content-type": "application/json" },
+    "POST",
+    { query: "{ issues { nodes { id title } } }" },
+  );
+  let body;
+  try {
+    body = JSON.parse(response.text);
+  } catch {
+    return { error: `HTTP ${response.status}: the response was not JSON` };
+  }
+  const nodes = body?.data?.issues?.nodes;
+  if (response.status !== 200 || !nodes) {
+    const messages = (body?.errors ?? []).map((err) => err.message).join("; ");
+    return {
+      error: `HTTP ${response.status}: ${messages || "no issues in the response"}`,
+    };
+  }
+  return { nodes };
+}
+
 async function queryLinearGql($, headers, method, data) {
   const response = await $.http.fetch(LINEAR_API_BASE_URL, {
     method: method,
@@ -73,28 +109,16 @@ export function register(on) {
 
     const { Box, Text, Button, Input, Select } = $.ui.resolve(e);
 
-    const redraw = () => $.ui.invalidate("ui.render");
+    const isConnected = await read($, connected);
 
-    // Persisted in the store so it survives a plugin reload.
-    const isConnectionSuccess =
-      (await $.store.get("isConnectionSuccess")) === true;
-
-    let issueNodes = [{ id: "test", title: "test" }];
-    if (isConnectionSuccess) {
-      const linearIssues = await queryLinearGql(
-        $,
-        { "content-type": "application/json" },
-        "POST",
-        { query: "{ issues { nodes { id title } } }" },
-      );
-
-      let { text: response } = linearIssues;
-      response = JSON.parse(response);
-
-      let data = response.data;
-      let issues = data.issues;
-      issueNodes = issues.nodes;
+    let issueNodes = [];
+    let fetchError;
+    if (isConnected) {
+      const result = await fetchIssues($);
+      if (result.error) fetchError = result.error;
+      else issueNodes = result.nodes;
     }
+    const showIssueForm = isConnected && !fetchError;
 
     const issueLinkForm = Box({
       children: [
@@ -137,8 +161,7 @@ export function register(on) {
                 if (!value.trim()) return;
                 await $.env.set("LINEAR_API_KEY", value.trim());
                 // A new key has not been tested yet.
-                await $.store.set("isConnectionSuccess", false);
-                redraw();
+                await update($, connected, () => false);
                 await $.ui.log(
                   `Linear Credentials Captured! Use 'Test Connection' to validate the connection`,
                 );
@@ -148,30 +171,28 @@ export function register(on) {
               key: "test-api",
               label: "Test Connection",
               onPress: async () => {
-                const response = await queryLinearGql(
-                  $,
-                  { "content-type": "application/json" },
-                  "POST",
-                  { query: "{ issues { nodes { id title } } }" },
-                );
-                const { status } = response;
-                if (status == 200) {
-                  await $.ui.log("Linear Configuration Succesful!");
-                  await $.store.set("isConnectionSuccess", true);
-                  redraw();
-                  // await $.ui.close({ id: "linear-issue-linking-pane" });
+                const result = await fetchIssues($);
+                // Writing the atom redraws the pane.
+                await update($, connected, () => !result.error);
+                if (result.error) {
+                  await $.ui.log(`Linear connection failed: ${result.error}`);
                 } else {
-                  await $.store.set("isConnectionSuccess", false);
-                  redraw();
-                  await $.ui.log(
-                    `Something went wrong: ${JSON.stringify(response)}`,
-                  );
+                  await $.ui.log("Linear Configuration Succesful!");
                 }
               },
             }),
+            ...(fetchError
+              ? [
+                  Text({
+                    children: [
+                      `Could not load Linear issues (${fetchError}). Enter your API key and test the connection again.`,
+                    ],
+                  }),
+                ]
+              : []),
           ],
         }),
-        ...(isConnectionSuccess ? [issueLinkForm] : []),
+        ...(showIssueForm ? [issueLinkForm] : []),
       ],
     });
   });
